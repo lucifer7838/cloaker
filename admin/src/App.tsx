@@ -4,9 +4,7 @@ import { Doughnut } from 'react-chartjs-2'
 
 ChartJS.register(ArcElement, Tooltip, Legend)
 
-const CLICKHOUSE_URL = import.meta.env.VITE_CLICKHOUSE_URL || 'http://localhost:8123'
-const CLICKHOUSE_USER = import.meta.env.VITE_CLICKHOUSE_USER || 'default'
-const CLICKHOUSE_PASSWORD = import.meta.env.VITE_CLICKHOUSE_PASSWORD || ''
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 
 interface AsnRow {
   asn: string
@@ -19,31 +17,18 @@ interface SplitData {
 }
 
 async function queryClickHouse<T>(sql: string): Promise<T[]> {
-  const headers: Record<string, string> = { 'Content-Type': 'text/plain' }
-  if (CLICKHOUSE_USER) {
-    headers['X-ClickHouse-User'] = CLICKHOUSE_USER
-  }
-  if (CLICKHOUSE_PASSWORD) {
-    headers['X-ClickHouse-Key'] = CLICKHOUSE_PASSWORD
-  }
-
-  const response = await fetch(CLICKHOUSE_URL, {
+  const response = await fetch(`${API_URL}/api/query`, {
     method: 'POST',
-    body: `${sql} FORMAT JSONEachRow`,
-    headers,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: sql }),
   })
 
   if (!response.ok) {
-    throw new Error(`ClickHouse query failed: ${response.status}`)
+    const err = await response.text()
+    throw new Error(`Query failed: ${response.status} ${err}`)
   }
 
-  const text = await response.text()
-  if (!text.trim()) return []
-
-  return text
-    .trim()
-    .split('\n')
-    .map((line) => JSON.parse(line) as T)
+  return response.json()
 }
 
 const styles: Record<string, React.CSSProperties> = {

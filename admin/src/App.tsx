@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
 import { Doughnut } from 'react-chartjs-2'
+import MLTuning from './components/MLTuning'
+import SubnetBans from './components/SubnetBans'
+import APIKeys from './components/APIKeys'
+import LiveTraffic from './components/LiveTraffic'
 
 ChartJS.register(ArcElement, Tooltip, Legend)
 
@@ -31,6 +35,8 @@ async function queryClickHouse<T>(sql: string): Promise<T[]> {
   return response.json()
 }
 
+type TabName = 'dashboard' | 'ml-tuning' | 'subnet-bans' | 'api-keys' | 'live-traffic'
+
 const styles: Record<string, React.CSSProperties> = {
   container: {
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
@@ -48,6 +54,35 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '1.75rem',
     fontWeight: 700,
     color: '#111827',
+    marginBottom: '1rem',
+  },
+  tabBar: {
+    display: 'flex',
+    gap: '0',
+    borderBottom: '2px solid #e5e7eb',
+    marginBottom: '1.5rem',
+  },
+  tab: {
+    padding: '0.75rem 1.25rem',
+    fontSize: '0.875rem',
+    fontWeight: 500,
+    color: '#6b7280',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    marginBottom: '-2px',
+    cursor: 'pointer',
+  },
+  tabActive: {
+    padding: '0.75rem 1.25rem',
+    fontSize: '0.875rem',
+    fontWeight: 600,
+    color: '#3b82f6',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid #3b82f6',
+    marginBottom: '-2px',
+    cursor: 'pointer',
   },
   grid: {
     display: 'grid',
@@ -107,7 +142,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
 }
 
-function App() {
+const tabs: { id: TabName; label: string }[] = [
+  { id: 'dashboard', label: 'Dashboard' },
+  { id: 'ml-tuning', label: 'ML Tuning' },
+  { id: 'subnet-bans', label: 'Subnet Bans' },
+  { id: 'api-keys', label: 'API Keys' },
+  { id: 'live-traffic', label: 'Live Traffic' },
+]
+
+function Dashboard() {
   const [visitsToday, setVisitsToday] = useState<number | null>(null)
   const [splitData, setSplitData] = useState<SplitData | null>(null)
   const [topAsns, setTopAsns] = useState<AsnRow[]>([])
@@ -171,11 +214,7 @@ function App() {
   }
 
   return (
-    <div style={styles.container}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>GhostRoute Admin</h1>
-      </header>
-
+    <>
       {error && <p style={styles.error}>Error: {error}</p>}
 
       <div style={styles.grid}>
@@ -227,6 +266,49 @@ function App() {
           </table>
         )}
       </div>
+    </>
+  )
+}
+
+function App() {
+  const [activeTab, setActiveTab] = useState<TabName>('dashboard')
+
+  function renderContent() {
+    switch (activeTab) {
+      case 'dashboard':
+        return <Dashboard />
+      case 'ml-tuning':
+        return <MLTuning />
+      case 'subnet-bans':
+        return <SubnetBans />
+      case 'api-keys':
+        return <APIKeys />
+      case 'live-traffic':
+        return <LiveTraffic />
+      default:
+        return <Dashboard />
+    }
+  }
+
+  return (
+    <div style={styles.container}>
+      <header style={styles.header}>
+        <h1 style={styles.title}>GhostRoute Admin</h1>
+      </header>
+
+      <div style={styles.tabBar}>
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            style={activeTab === tab.id ? styles.tabActive : styles.tab}
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {renderContent()}
     </div>
   )
 }

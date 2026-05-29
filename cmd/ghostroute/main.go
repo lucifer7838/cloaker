@@ -16,6 +16,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/lucifer7838/ghostroute/internal/admin"
 	"github.com/lucifer7838/ghostroute/internal/auth"
 	"github.com/lucifer7838/ghostroute/internal/campaign"
 	"github.com/lucifer7838/ghostroute/internal/clicklog"
@@ -38,7 +39,7 @@ func main() {
 	postgresDSN := getEnv("POSTGRES_DSN", "postgres://localhost:5432/ghostroute")
 	clickhouseDSN := getEnv("CLICKHOUSE_DSN", "clickhouse://localhost:9000/ghostroute")
 	rabbitmqURL := getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
-	_ = getEnv("ML_SERVICE_URL", "http://localhost:8000")
+	mlServiceURL := getEnv("ML_SERVICE_URL", "http://localhost:8000")
 	botThreshold := getEnvFloat("BOT_THRESHOLD", 0.7)
 	defaultRateLimit := getEnvInt("DEFAULT_RATE_LIMIT", 1000)
 	subnetBanThreshold := getEnvInt("SUBNET_BAN_THRESHOLD", 5)
@@ -157,6 +158,10 @@ func main() {
 	// Initialize ClickHouse query proxy for admin dashboard
 	queryHandler := newQueryHandler(clickhouseDSN)
 
+	// Initialize admin handler with traffic broadcaster
+	trafficBroadcaster := admin.NewTrafficBroadcaster()
+	adminHandler := admin.NewHandler(redisClient, pgPool, subnetBanner, mlServiceURL, trafficBroadcaster)
+
 	// Register routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -180,6 +185,9 @@ func main() {
 		mux.Handle("/api/postback", rateLimitMw(postbackHandler))
 		mux.Handle("/api/query", rateLimitMw(http.HandlerFunc(queryHandler)))
 	}
+
+	// Register admin API routes
+	adminHandler.RegisterRoutes(mux)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

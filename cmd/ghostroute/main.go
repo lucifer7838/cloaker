@@ -15,10 +15,15 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/lucifer7838/ghostroute/internal/campaign"
 	"github.com/lucifer7838/ghostroute/internal/clicklog"
 	"github.com/lucifer7838/ghostroute/internal/evaluate"
+	"github.com/lucifer7838/ghostroute/internal/fingerprint"
 	"github.com/lucifer7838/ghostroute/internal/ipmatch"
+	"github.com/lucifer7838/ghostroute/internal/postback"
+	"github.com/lucifer7838/ghostroute/internal/rabbitmq"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -27,6 +32,8 @@ func main() {
 	redisPassword := getEnv("REDIS_PASSWORD", "")
 	postgresDSN := getEnv("POSTGRES_DSN", "postgres://localhost:5432/ghostroute")
 	clickhouseDSN := getEnv("CLICKHOUSE_DSN", "clickhouse://localhost:9000/ghostroute")
+	rabbitmqURL := getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+	_ = getEnv("ML_SERVICE_URL", "http://localhost:8000")
 	botThreshold := getEnvFloat("BOT_THRESHOLD", 0.7)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -34,6 +41,13 @@ func main() {
 
 	// Initialize Redis client for ASN lookups
 	ipClient := ipmatch.NewClient(redisAddr, redisPassword, 0)
+
+	// Initialize Redis client for ML score cache
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: redisPassword,
+		DB:       0,
+	})
 
 	// Initialize PostgreSQL campaign loader
 	campaignLoader, err := campaign.NewLoader(ctx, postgresDSN)
@@ -53,6 +67,30 @@ func main() {
 		clickLogger.Start(ctx)
 	}
 
+	// Initialize RabbitMQ producer
+	var producer *rabbitmq.Producer
+	producer, err = rabbitmq.NewProducer(rabbitmq.ProducerConfig{
+		URL:      rabbitmqURL,
+		PoolSize: 5,
+	})
+	if err != nil {
+		log.Printf("WARN: rabbitmq producer init failed (events will not be published): %v", err)
+		producer = nil
+	} else {
+		// Declare topology
+		conn, dialErr := amqp.Dial(rabbitmqURL)
+		if dialErr == nil {
+			ch, chErr := conn.Channel()
+			if chErr == nil {
+				if topErr := rabbitmq.DeclareTopology(ch); topErr != nil {
+					log.Printf("WARN: declare rabbitmq topology: %v", topErr)
+				}
+				ch.Close()
+			}
+			conn.Close()
+		}
+	}
+
 	// Build the evaluate handler
 	var loader *campaign.Loader
 	if campaignLoader != nil {
@@ -64,6 +102,21 @@ func main() {
 	}
 
 	evalHandler := evaluate.NewHandler(ipClient, loader, logger, botThreshold)
+	if producer != nil {
+		evalHandler.SetProducer(producer)
+	}
+	evalHandler.SetRedisClient(redisClient)
+
+	// Initialize fingerprint handler
+	fpHandler := fingerprint.NewHandler(redisClient, nil)
+
+	// Initialize postback handler
+	var postbackHandler *postback.Handler
+	if producer != nil {
+		postbackHandler = postback.NewHandler(clickhouseDSN, producer)
+	} else {
+		postbackHandler = postback.NewHandler(clickhouseDSN, nil)
+	}
 
 	// Initialize ClickHouse query proxy for admin dashboard
 	queryHandler := newQueryHandler(clickhouseDSN)
@@ -72,6 +125,8 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.Handle("/evaluate", evalHandler)
+	mux.Handle("/fingerprint", fpHandler)
+	mux.Handle("/api/postback", postbackHandler)
 	mux.HandleFunc("/api/query", queryHandler)
 
 	srv := &http.Server{
@@ -82,7 +137,7 @@ func main() {
 	// Start server
 	go func() {
 		log.Printf("INFO: GhostRoute starting on :%s", port)
-		log.Printf("INFO: Redis=%s, ClickHouse=%s", redisAddr, clickhouseDSN)
+		log.Printf("INFO: Redis=%s, ClickHouse=%s, RabbitMQ=%s", redisAddr, clickhouseDSN, rabbitmqURL)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("FATAL: server error: %v", err)
 		}
@@ -103,6 +158,11 @@ func main() {
 
 	cancel()
 
+	if producer != nil {
+		if err := producer.Close(); err != nil {
+			log.Printf("ERROR: rabbitmq producer close: %v", err)
+		}
+	}
 	if clickLogger != nil {
 		clickLogger.Close()
 	}
@@ -111,6 +171,9 @@ func main() {
 	}
 	if err := ipClient.Close(); err != nil {
 		log.Printf("ERROR: redis close: %v", err)
+	}
+	if err := redisClient.Close(); err != nil {
+		log.Printf("ERROR: redis ml client close: %v", err)
 	}
 
 	log.Println("INFO: shutdown complete")
@@ -205,10 +268,10 @@ func newQueryHandler(dsn string) http.HandlerFunc {
 		}
 		defer conn.Close()
 
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
+		queryCtx, queryCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer queryCancel()
 
-		rows, err := conn.Query(ctx, sql)
+		rows, err := conn.Query(queryCtx, sql)
 		if err != nil {
 			log.Printf("ERROR: query handler query: %v", err)
 			http.Error(w, fmt.Sprintf(`{"error":"query failed: %s"}`, err.Error()), http.StatusBadRequest)

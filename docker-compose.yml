@@ -223,6 +223,35 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # ===========================================================================
+  # ML Service - XGBoost bot detection with FastAPI
+  # ===========================================================================
+  ml:
+    build:
+      context: ./ml
+    container_name: ghostroute-ml
+    expose:
+      - "8000"
+    environment:
+      - MODELS_DIR=/models
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CLICKHOUSE_URL=http://clickhouse:8123
+    volumes:
+      - ml-models:/models
+    networks:
+      - backend
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
 networks:
   backend:
     driver: bridge
@@ -234,3 +263,4 @@ volumes:
   clickhouse-logs:
   qdrant-data:
   rabbitmq-data:
+  ml-models:

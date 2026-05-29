@@ -1,9 +1,12 @@
 package evaluate
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +17,8 @@ import (
 	"github.com/lucifer7838/ghostroute/internal/ipmatch"
 	"github.com/lucifer7838/ghostroute/internal/ja3"
 	"github.com/lucifer7838/ghostroute/internal/qdrant"
+	"github.com/lucifer7838/ghostroute/internal/rabbitmq"
+	"github.com/redis/go-redis/v9"
 )
 
 // EvaluateRequest is the JSON request body for POST /evaluate.
@@ -47,6 +52,8 @@ type Handler struct {
 	clickLogger  *clicklog.Logger
 	ja3Client    *ja3.Client
 	qdrantClient *qdrant.Client
+	producer     *rabbitmq.Producer
+	redisClient  *redis.Client
 	botThreshold float64
 }
 
@@ -68,6 +75,16 @@ func (h *Handler) SetJA3Client(c *ja3.Client) {
 // SetQdrantClient sets the Qdrant client for vector similarity checks.
 func (h *Handler) SetQdrantClient(c *qdrant.Client) {
 	h.qdrantClient = c
+}
+
+// SetProducer sets the RabbitMQ producer for event publishing.
+func (h *Handler) SetProducer(p *rabbitmq.Producer) {
+	h.producer = p
+}
+
+// SetRedisClient sets the Redis client for cached ML score lookups.
+func (h *Handler) SetRedisClient(rc *redis.Client) {
+	h.redisClient = rc
 }
 
 // ServeHTTP handles POST /evaluate requests.
@@ -120,6 +137,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check Redis for cached ML score
+	var mlScore float64
+	var hasMLScore bool
+	if h.redisClient != nil && req.IP != "" && req.CampaignID != "" {
+		mlScore, hasMLScore = h.getCachedMLScore(ctx, req.IP, req.CampaignID)
+	}
+
 	// Load campaign config if provided
 	var camp *campaign.Campaign
 	if req.CampaignID != "" && h.campaigns != nil {
@@ -131,31 +155,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ASN: asnInfo,
 	}
 
-	switch {
-	case isBot:
-		resp.Decision = "block"
-		resp.Score = 1.0
-		resp.Reason = "bot_ua_match"
-	case ja3IsBot:
-		resp.Decision = "block"
-		resp.Score = 0.95
-		resp.Reason = "ja3_known_bot"
-	case ja3Mismatch:
-		resp.Decision = "block"
-		resp.Score = 0.9
-		resp.Reason = "ja3_mismatch"
-	case qdrantBotScore > 0.90:
-		resp.Decision = "block"
-		resp.Score = float64(qdrantBotScore)
-		resp.Reason = "fingerprint_similarity"
-	case asnResult.Found && isDatacenterASN(asnResult.ASName):
-		resp.Decision = "block"
-		resp.Score = 0.8
-		resp.Reason = "datacenter_asn"
-	default:
-		resp.Decision = "allow"
-		resp.Score = 0.0
-		resp.Reason = "clean"
+	// Dual scoring: 0.6 * vector_similarity + 0.4 * xgboost_score
+	if hasMLScore && qdrantBotScore > 0 {
+		combinedScore := 0.6*float64(qdrantBotScore) + 0.4*mlScore
+		if combinedScore > h.botThreshold {
+			resp.Decision = "block"
+			resp.Score = combinedScore
+			resp.Reason = "dual_score_threshold"
+		}
+	}
+
+	// If dual scoring did not produce a block, fall through to rule-based
+	if resp.Decision == "" {
+		switch {
+		case isBot:
+			resp.Decision = "block"
+			resp.Score = 1.0
+			resp.Reason = "bot_ua_match"
+		case ja3IsBot:
+			resp.Decision = "block"
+			resp.Score = 0.95
+			resp.Reason = "ja3_known_bot"
+		case ja3Mismatch:
+			resp.Decision = "block"
+			resp.Score = 0.9
+			resp.Reason = "ja3_mismatch"
+		case qdrantBotScore > 0.90:
+			resp.Decision = "block"
+			resp.Score = float64(qdrantBotScore)
+			resp.Reason = "fingerprint_similarity"
+		case hasMLScore && mlScore > h.botThreshold:
+			resp.Decision = "block"
+			resp.Score = mlScore
+			resp.Reason = "ml_score_threshold"
+		case asnResult.Found && isDatacenterASN(asnResult.ASName):
+			resp.Decision = "block"
+			resp.Score = 0.8
+			resp.Reason = "datacenter_asn"
+		default:
+			resp.Decision = "allow"
+			resp.Score = 0.0
+			resp.Reason = "clean"
+		}
 	}
 
 	// Fire-and-forget log to ClickHouse
@@ -173,9 +214,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ja3Hash = tlsFP.JA3Hash
 	}
 
+	eventID := uuid.New().String()
+
 	if h.clickLogger != nil {
 		h.clickLogger.Log(clicklog.Visit{
-			EventID:    uuid.New().String(),
+			EventID:    eventID,
 			CampaignID: campaignID,
 			EventTime:  time.Now().UTC(),
 			VisitorIP:  req.IP,
@@ -196,11 +239,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Publish click event to RabbitMQ for async ML processing
+	if h.producer != nil {
+		clickMsg := rabbitmq.NewClickEventMessage(
+			eventID,
+			campaignID,
+			req.IP,
+			req.UserAgent,
+			req.FingerprintHash,
+			"",
+			"",
+			"",
+			ja3Hash,
+			float32(resp.Score),
+		)
+		go func() {
+			pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.producer.Publish(pubCtx, "ghostroute.clicks", "click.general", clickMsg); err != nil {
+				log.Printf("ERROR: publish click event to rabbitmq: %v", err)
+			}
+		}()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		log.Printf("ERROR: encode response: %v", err)
 	}
+}
+
+// getCachedMLScore retrieves a cached ML score from Redis.
+func (h *Handler) getCachedMLScore(ctx context.Context, ip, campaignID string) (float64, bool) {
+	key := fmt.Sprintf("ml:score:%s:%s", ip, campaignID)
+	val, err := h.redisClient.Get(ctx, key).Result()
+	if err != nil {
+		return 0, false
+	}
+	score, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return 0, false
+	}
+	return score, true
 }
 
 // isDatacenterASN checks if the ASN name suggests a datacenter/hosting provider.

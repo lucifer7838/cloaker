@@ -1,0 +1,33 @@
+# Binaries
+bin/
+cmd/ghostroute/ghostroute
+*.exe
+
+# Go
+vendor/
+
+# Node
+admin/node_modules/
+admin/dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files
+*.sqlite
+*.csv

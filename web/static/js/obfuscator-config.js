@@ -1,0 +1,20 @@
+module.exports = {
+  controlFlowFlattening: true,
+  controlFlowFlatteningThreshold: 0.7,
+  deadCodeInjection: true,
+  deadCodeInjectionThreshold: 0.3,
+  stringEncryption: true,
+  stringArrayRotate: true,
+  identifierNamesGenerator: 'hexadecimal',
+  target: 'browser',
+  selfDefending: true,
+  splitStrings: true,
+  splitStringsChunkLength: 5,
+  transformObjectKeys: true,
+  unicodeEscapeSequence: false,
+  numbersToExpressions: true,
+  debugProtection: false,
+  disableConsoleOutput: false,
+  renameGlobals: false,
+  compact: true
+};

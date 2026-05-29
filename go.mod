@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/redis/go-redis/v9 v9.20.0
+	github.com/spaolacci/murmur3 v1.1.0
 )
 
 require (

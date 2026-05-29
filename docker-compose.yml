@@ -196,16 +196,18 @@ services:
     restart: unless-stopped
 
   # ===========================================================================
-  # Nginx - Reverse proxy and TLS termination
+  # Nginx - Custom build with SSL/TLS fingerprint module
   # ===========================================================================
   nginx:
-    image: nginx:1.27-alpine
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
     container_name: ghostroute-nginx
     ports:
       - "${NGINX_HTTP_PORT:-80}:80"
       - "${NGINX_HTTPS_PORT:-443}:443"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
     networks:
       - backend
     depends_on:

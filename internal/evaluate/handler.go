@@ -12,15 +12,18 @@ import (
 	"github.com/lucifer7838/ghostroute/internal/campaign"
 	"github.com/lucifer7838/ghostroute/internal/clicklog"
 	"github.com/lucifer7838/ghostroute/internal/ipmatch"
+	"github.com/lucifer7838/ghostroute/internal/ja3"
+	"github.com/lucifer7838/ghostroute/internal/qdrant"
 )
 
 // EvaluateRequest is the JSON request body for POST /evaluate.
 type EvaluateRequest struct {
-	IP         string            `json:"ip"`
-	UserAgent  string            `json:"user_agent"`
-	Headers    map[string]string `json:"headers"`
-	JA3        string            `json:"ja3"`
-	CampaignID string            `json:"campaign_id"`
+	IP              string            `json:"ip"`
+	UserAgent       string            `json:"user_agent"`
+	Headers         map[string]string `json:"headers"`
+	JA3             string            `json:"ja3"`
+	CampaignID      string            `json:"campaign_id"`
+	FingerprintHash string            `json:"fingerprint_hash,omitempty"`
 }
 
 // EvaluateResponse is the JSON response for POST /evaluate.
@@ -42,6 +45,8 @@ type Handler struct {
 	ipClient     *ipmatch.Client
 	campaigns    *campaign.Loader
 	clickLogger  *clicklog.Logger
+	ja3Client    *ja3.Client
+	qdrantClient *qdrant.Client
 	botThreshold float64
 }
 
@@ -53,6 +58,16 @@ func NewHandler(ipClient *ipmatch.Client, campaigns *campaign.Loader, clickLogge
 		clickLogger:  clickLogger,
 		botThreshold: botThreshold,
 	}
+}
+
+// SetJA3Client sets the JA3 client for TLS fingerprint analysis.
+func (h *Handler) SetJA3Client(c *ja3.Client) {
+	h.ja3Client = c
+}
+
+// SetQdrantClient sets the Qdrant client for vector similarity checks.
+func (h *Handler) SetQdrantClient(c *qdrant.Client) {
+	h.qdrantClient = c
 }
 
 // ServeHTTP handles POST /evaluate requests.
@@ -83,6 +98,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check bot via UA
 	isBot := botdetect.MatchesBot(req.UserAgent)
 
+	// JA3 fingerprint analysis
+	var ja3Mismatch bool
+	var ja3IsBot bool
+	tlsFP := ja3.ExtractFromHeaders(r)
+	if h.ja3Client != nil {
+		ja3IsBot = h.ja3Client.IsKnownBot(ctx, tlsFP)
+		ja3Mismatch = h.ja3Client.CheckMismatch(tlsFP, req.UserAgent)
+	}
+
+	// Qdrant vector similarity check
+	var qdrantBotScore float32
+	if h.qdrantClient != nil && req.FingerprintHash != "" {
+		results, err := h.qdrantClient.Search(ctx, nil, nil, 0.90, 5)
+		if err == nil {
+			for _, result := range results {
+				if result.Score > qdrantBotScore {
+					qdrantBotScore = result.Score
+				}
+			}
+		}
+	}
+
 	// Load campaign config if provided
 	var camp *campaign.Campaign
 	if req.CampaignID != "" && h.campaigns != nil {
@@ -99,6 +136,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp.Decision = "block"
 		resp.Score = 1.0
 		resp.Reason = "bot_ua_match"
+	case ja3IsBot:
+		resp.Decision = "block"
+		resp.Score = 0.95
+		resp.Reason = "ja3_known_bot"
+	case ja3Mismatch:
+		resp.Decision = "block"
+		resp.Score = 0.9
+		resp.Reason = "ja3_mismatch"
+	case qdrantBotScore > 0.90:
+		resp.Decision = "block"
+		resp.Score = float64(qdrantBotScore)
+		resp.Reason = "fingerprint_similarity"
 	case asnResult.Found && isDatacenterASN(asnResult.ASName):
 		resp.Decision = "block"
 		resp.Score = 0.8
@@ -111,12 +160,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Fire-and-forget log to ClickHouse
 	var botFlag uint8
-	if isBot {
+	if resp.Decision == "block" {
 		botFlag = 1
 	}
 	campaignID := req.CampaignID
 	if camp != nil {
 		campaignID = camp.ID
+	}
+
+	ja3Hash := req.JA3
+	if ja3Hash == "" {
+		ja3Hash = tlsFP.JA3Hash
 	}
 
 	if h.clickLogger != nil {
@@ -138,7 +192,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Reason:     resp.Reason,
 			ASNNumber:  asnResult.ASNumber,
 			ASNName:    asnResult.ASName,
-			JA3Hash:    req.JA3,
+			JA3Hash:    ja3Hash,
 		})
 	}
 

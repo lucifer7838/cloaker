@@ -7,7 +7,7 @@ CREATE DATABASE IF NOT EXISTS ghostroute;
 CREATE TABLE IF NOT EXISTS ghostroute.visits
 (
     event_id     UUID DEFAULT generateUUIDv4(),
-    campaign_id  UInt32,
+    campaign_id  String DEFAULT '',
     event_time   DateTime64(3, 'UTC'),
     visitor_ip   IPv6,
     user_agent   String,

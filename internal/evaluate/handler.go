@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -84,7 +85,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Load campaign config if provided
 	var camp *campaign.Campaign
-	if req.CampaignID != "" {
+	if req.CampaignID != "" && h.campaigns != nil {
 		camp, _ = h.campaigns.GetCampaign(ctx, req.CampaignID)
 	}
 
@@ -113,32 +114,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isBot {
 		botFlag = 1
 	}
-	var campaignID uint32
+	campaignID := req.CampaignID
 	if camp != nil {
-		// Campaign ID is a UUID string; use 0 for the uint32 log field
-		campaignID = 0
+		campaignID = camp.ID
 	}
 
-	h.clickLogger.Log(clicklog.Visit{
-		EventID:    uuid.New().String(),
-		CampaignID: campaignID,
-		EventTime:  time.Now().UTC(),
-		VisitorIP:  req.IP,
-		UserAgent:  req.UserAgent,
-		Country:    "",
-		DeviceType: "",
-		OS:         "",
-		Browser:    "",
-		Referer:    "",
-		LandingURL: "",
-		IsBot:      botFlag,
-		BotScore:   float32(resp.Score),
-		Decision:   resp.Decision,
-		Reason:     resp.Reason,
-		ASNNumber:  asnResult.ASNumber,
-		ASNName:    asnResult.ASName,
-		JA3Hash:    req.JA3,
-	})
+	if h.clickLogger != nil {
+		h.clickLogger.Log(clicklog.Visit{
+			EventID:    uuid.New().String(),
+			CampaignID: campaignID,
+			EventTime:  time.Now().UTC(),
+			VisitorIP:  req.IP,
+			UserAgent:  req.UserAgent,
+			Country:    "",
+			DeviceType: "",
+			OS:         "",
+			Browser:    "",
+			Referer:    "",
+			LandingURL: "",
+			IsBot:      botFlag,
+			BotScore:   float32(resp.Score),
+			Decision:   resp.Decision,
+			Reason:     resp.Reason,
+			ASNNumber:  asnResult.ASNumber,
+			ASNName:    asnResult.ASName,
+			JA3Hash:    req.JA3,
+		})
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -154,17 +156,9 @@ func isDatacenterASN(name string) bool {
 		"DIGITALOCEAN", "LINODE", "VULTR", "OVH", "HETZNER",
 		"CONTABO", "HOSTINGER", "SCALEWAY", "ORACLE-CLOUD",
 	}
+	upper := strings.ToUpper(name)
 	for _, kw := range datacenterKeywords {
-		if len(name) >= len(kw) && containsUpper(name, kw) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsUpper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
+		if strings.Contains(upper, kw) {
 			return true
 		}
 	}

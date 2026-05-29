@@ -20,6 +20,7 @@ import (
 func main() {
 	port := getEnv("GHOSTROUTE_PORT", "8080")
 	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	redisPassword := getEnv("REDIS_PASSWORD", "")
 	postgresDSN := getEnv("POSTGRES_DSN", "postgres://localhost:5432/ghostroute")
 	clickhouseDSN := getEnv("CLICKHOUSE_DSN", "clickhouse://localhost:9000/ghostroute")
 	botThreshold := getEnvFloat("BOT_THRESHOLD", 0.7)
@@ -28,7 +29,7 @@ func main() {
 	defer cancel()
 
 	// Initialize Redis client for ASN lookups
-	ipClient := ipmatch.NewClient(redisAddr, "", 0)
+	ipClient := ipmatch.NewClient(redisAddr, redisPassword, 0)
 
 	// Initialize PostgreSQL campaign loader
 	campaignLoader, err := campaign.NewLoader(ctx, postgresDSN)

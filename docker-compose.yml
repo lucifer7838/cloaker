@@ -180,7 +180,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     volumes:
-      - ./php/src:/var/www/html:ro
+      - ./php:/var/www/html:ro
     networks:
       - backend
     depends_on:

@@ -13,7 +13,7 @@ import (
 // Visit represents a single visit event to be logged to ClickHouse.
 type Visit struct {
 	EventID    string
-	CampaignID uint32
+	CampaignID string
 	EventTime  time.Time
 	VisitorIP  string
 	UserAgent  string

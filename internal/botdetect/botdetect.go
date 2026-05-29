@@ -61,7 +61,6 @@ var botPatterns = []string{
 	"CrawlerBot",
 	"spider",
 	"Crawler",
-	"bot",
 	"HeadlessChrome",
 	"PhantomJS",
 	"Selenium",

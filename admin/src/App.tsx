@@ -5,6 +5,8 @@ import { Doughnut } from 'react-chartjs-2'
 ChartJS.register(ArcElement, Tooltip, Legend)
 
 const CLICKHOUSE_URL = import.meta.env.VITE_CLICKHOUSE_URL || 'http://localhost:8123'
+const CLICKHOUSE_USER = import.meta.env.VITE_CLICKHOUSE_USER || 'default'
+const CLICKHOUSE_PASSWORD = import.meta.env.VITE_CLICKHOUSE_PASSWORD || ''
 
 interface AsnRow {
   asn: string
@@ -17,10 +19,18 @@ interface SplitData {
 }
 
 async function queryClickHouse<T>(sql: string): Promise<T[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'text/plain' }
+  if (CLICKHOUSE_USER) {
+    headers['X-ClickHouse-User'] = CLICKHOUSE_USER
+  }
+  if (CLICKHOUSE_PASSWORD) {
+    headers['X-ClickHouse-Key'] = CLICKHOUSE_PASSWORD
+  }
+
   const response = await fetch(CLICKHOUSE_URL, {
     method: 'POST',
     body: `${sql} FORMAT JSONEachRow`,
-    headers: { 'Content-Type': 'text/plain' },
+    headers,
   })
 
   if (!response.ok) {
@@ -127,13 +137,13 @@ function App() {
 
         const [visitsResult, splitResult, asnResult] = await Promise.all([
           queryClickHouse<{ cnt: number }>(
-            "SELECT count() as cnt FROM ghostroute.clicks WHERE toDate(timestamp) = today()"
+            "SELECT count() as cnt FROM ghostroute.visits WHERE toDate(event_time) = today()"
           ),
           queryClickHouse<{ decision: string; cnt: number }>(
-            "SELECT decision, count() as cnt FROM ghostroute.clicks WHERE toDate(timestamp) = today() GROUP BY decision"
+            "SELECT decision, count() as cnt FROM ghostroute.visits WHERE toDate(event_time) = today() GROUP BY decision"
           ),
           queryClickHouse<{ asn: string; block_count: number }>(
-            "SELECT asn, count() as block_count FROM ghostroute.clicks WHERE toDate(timestamp) = today() AND decision = 'block' GROUP BY asn ORDER BY block_count DESC LIMIT 10"
+            "SELECT asn_name as asn, count() as block_count FROM ghostroute.visits WHERE toDate(event_time) = today() AND decision = 'block' GROUP BY asn_name ORDER BY block_count DESC LIMIT 10"
           ),
         ])
 

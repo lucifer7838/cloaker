@@ -24,12 +24,13 @@ import (
 
 // EvaluateRequest is the JSON request body for POST /evaluate.
 type EvaluateRequest struct {
-	IP              string            `json:"ip"`
-	UserAgent       string            `json:"user_agent"`
-	Headers         map[string]string `json:"headers"`
-	JA3             string            `json:"ja3"`
-	CampaignID      string            `json:"campaign_id"`
-	FingerprintHash string            `json:"fingerprint_hash,omitempty"`
+	IP              string                      `json:"ip"`
+	UserAgent       string                      `json:"user_agent"`
+	Headers         map[string]string           `json:"headers"`
+	JA3             string                      `json:"ja3"`
+	CampaignID      string                      `json:"campaign_id"`
+	FingerprintHash string                      `json:"fingerprint_hash,omitempty"`
+	FingerprintData *qdrant.FingerprintFeatures `json:"fingerprint_data,omitempty"`
 }
 
 // EvaluateResponse is the JSON response for POST /evaluate.
@@ -149,8 +150,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Qdrant vector similarity check
 	var qdrantBotScore float32
-	if h.qdrantClient != nil && req.FingerprintHash != "" {
-		results, err := h.qdrantClient.Search(ctx, nil, nil, 0.90, 5)
+	if h.qdrantClient != nil && req.FingerprintData != nil {
+		queryVector := qdrant.GenerateEmbedding(req.FingerprintData)
+		results, err := h.qdrantClient.Search(ctx, queryVector, nil, 0.90, 5)
 		if err == nil {
 			for _, result := range results {
 				if result.Score > qdrantBotScore {

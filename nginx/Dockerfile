@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     ca-certificates \
     curl \
+    git \
     libpcre3-dev \
     libgd-dev \
     libgeoip-dev \
@@ -48,6 +49,10 @@ RUN curl -fSL "https://github.com/openresty/lua-nginx-module/archive/refs/tags/v
     -o lua-nginx.tar.gz \
     && tar xzf lua-nginx.tar.gz
 
+# Clone nginx-ssl-fingerprint module for JA3 support
+# This module exposes $ssl_client_raw_hello and $ssl_ja3_hash variables
+RUN git clone --depth 1 https://github.com/phuslu/nginx-ssl-fingerprint.git
+
 # Download lua-resty-core
 RUN curl -fSL "https://github.com/openresty/lua-resty-core/archive/refs/tags/v${LUA_RESTY_CORE_VERSION}.tar.gz" \
     -o lua-resty-core.tar.gz \
@@ -82,6 +87,7 @@ RUN curl -fSL "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz" \
         --with-stream_realip_module \
         --add-module=/build/ngx_devel_kit-${NGX_DEVEL_KIT_VERSION} \
         --add-module=/build/lua-nginx-module-${LUA_NGINX_MODULE_VERSION} \
+        --add-module=/build/nginx-ssl-fingerprint \
         --with-ld-opt="-Wl,-rpath,/usr/local/luajit/lib" \
     && make -j$(nproc) \
     && make install

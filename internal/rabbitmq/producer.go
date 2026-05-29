@@ -21,6 +21,7 @@ type Producer struct {
 	poolSize    int
 	mu          sync.Mutex
 	closed      bool
+	closeOnce   sync.Once
 	notifyClose chan *amqp.Error
 }
 
@@ -129,13 +130,27 @@ func (p *Producer) Publish(ctx context.Context, exchange, routingKey string, msg
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return fmt.Errorf("producer is closed")
+	}
+	p.mu.Unlock()
+
 	var ch *amqp.Channel
 	select {
 	case ch = <-p.channels:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	defer func() { p.channels <- ch }()
+	defer func() {
+		p.mu.Lock()
+		closed := p.closed
+		p.mu.Unlock()
+		if !closed {
+			p.channels <- ch
+		}
+	}()
 
 	confirmation, err := ch.PublishWithDeferredConfirmWithContext(
 		ctx,
@@ -164,17 +179,20 @@ func (p *Producer) Publish(ctx context.Context, exchange, routingKey string, msg
 
 // Close gracefully shuts down the producer.
 func (p *Producer) Close() error {
-	p.mu.Lock()
-	p.closed = true
-	p.mu.Unlock()
+	var closeErr error
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 
-	close(p.channels)
-	for ch := range p.channels {
-		_ = ch.Close()
-	}
+		close(p.channels)
+		for ch := range p.channels {
+			_ = ch.Close()
+		}
 
-	if p.conn != nil && !p.conn.IsClosed() {
-		return p.conn.Close()
-	}
-	return nil
+		if p.conn != nil && !p.conn.IsClosed() {
+			closeErr = p.conn.Close()
+		}
+	})
+	return closeErr
 }

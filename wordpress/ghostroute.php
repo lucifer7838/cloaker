@@ -148,8 +148,8 @@ class GhostRoute_Plugin {
 
         if (!is_wp_error($page_response) && wp_remote_retrieve_response_code($page_response) === 200) {
             $content = wp_remote_retrieve_body($page_response);
-            // Output the black page content directly
-            echo $content; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+            // Sanitize remote HTML - allow safe HTML tags via wp_kses_post
+            echo wp_kses_post($content);
             exit;
         }
     }

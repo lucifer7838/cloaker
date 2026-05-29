@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/lucifer7838/ghostroute/internal/rabbitmq"
 )
@@ -24,15 +24,15 @@ type PostbackRequest struct {
 
 // Handler handles POST /api/postback for conversion tracking.
 type Handler struct {
-	clickhouseDSN string
-	producer      *rabbitmq.Producer
+	chConn   driver.Conn
+	producer *rabbitmq.Producer
 }
 
-// NewHandler creates a new postback handler.
-func NewHandler(clickhouseDSN string, producer *rabbitmq.Producer) *Handler {
+// NewHandler creates a new postback handler with a pre-initialized ClickHouse connection.
+func NewHandler(chConn driver.Conn, producer *rabbitmq.Producer) *Handler {
 	return &Handler{
-		clickhouseDSN: clickhouseDSN,
-		producer:      producer,
+		chConn:   chConn,
+		producer: producer,
 	}
 }
 
@@ -92,21 +92,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) markConversion(ctx context.Context, clickID string) error {
-	opts, err := clickhouse.ParseDSN(h.clickhouseDSN)
-	if err != nil {
-		return fmt.Errorf("parse dsn: %w", err)
+	if h.chConn == nil {
+		return fmt.Errorf("clickhouse connection not initialized")
 	}
-
-	conn, err := clickhouse.Open(opts)
-	if err != nil {
-		return fmt.Errorf("open connection: %w", err)
-	}
-	defer conn.Close()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	err = conn.Exec(queryCtx,
+	err := h.chConn.Exec(queryCtx,
 		"ALTER TABLE visits UPDATE is_conversion = 1 WHERE event_id = ?",
 		clickID,
 	)

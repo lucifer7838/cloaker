@@ -34,13 +34,18 @@ type TrafficEvent struct {
 // TrafficBroadcaster manages WebSocket clients for live traffic streaming.
 type TrafficBroadcaster struct {
 	mu      sync.RWMutex
-	clients map[*websocket.Conn]bool
+	clients map[*websocket.Conn]*clientEntry
+}
+
+// clientEntry holds per-client write mutex to prevent concurrent writes.
+type clientEntry struct {
+	writeMu sync.Mutex
 }
 
 // NewTrafficBroadcaster creates a new TrafficBroadcaster.
 func NewTrafficBroadcaster() *TrafficBroadcaster {
 	return &TrafficBroadcaster{
-		clients: make(map[*websocket.Conn]bool),
+		clients: make(map[*websocket.Conn]*clientEntry),
 	}
 }
 
@@ -48,7 +53,7 @@ func NewTrafficBroadcaster() *TrafficBroadcaster {
 func (tb *TrafficBroadcaster) AddClient(conn *websocket.Conn) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
-	tb.clients[conn] = true
+	tb.clients[conn] = &clientEntry{}
 }
 
 // RemoveClient removes a WebSocket connection.
@@ -60,19 +65,31 @@ func (tb *TrafficBroadcaster) RemoveClient(conn *websocket.Conn) {
 
 // Broadcast sends a traffic event to all connected WebSocket clients.
 func (tb *TrafficBroadcaster) Broadcast(event TrafficEvent) {
-	tb.mu.RLock()
-	defer tb.mu.RUnlock()
-
 	data, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
 
-	for conn := range tb.clients {
-		err := conn.WriteMessage(websocket.TextMessage, data)
+	// Collect clients under lock
+	tb.mu.RLock()
+	type connEntry struct {
+		conn  *websocket.Conn
+		entry *clientEntry
+	}
+	snapshot := make([]connEntry, 0, len(tb.clients))
+	for conn, entry := range tb.clients {
+		snapshot = append(snapshot, connEntry{conn: conn, entry: entry})
+	}
+	tb.mu.RUnlock()
+
+	// Write outside the lock, using per-client mutex
+	for _, ce := range snapshot {
+		ce.entry.writeMu.Lock()
+		err := ce.conn.WriteMessage(websocket.TextMessage, data)
+		ce.entry.writeMu.Unlock()
 		if err != nil {
-			conn.Close()
-			go tb.RemoveClient(conn)
+			ce.conn.Close()
+			tb.RemoveClient(ce.conn)
 		}
 	}
 }
@@ -109,14 +126,22 @@ var upgrader = websocket.Upgrader{
 }
 
 // RegisterRoutes registers all admin API routes on the given mux.
-func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/admin/model/info", h.handleModelInfo)
-	mux.HandleFunc("/api/admin/model/config", h.handleModelConfig)
-	mux.HandleFunc("/api/admin/subnets", h.handleSubnets)
-	mux.HandleFunc("/api/admin/subnets/unban", h.handleSubnetUnban)
-	mux.HandleFunc("/api/admin/keys", h.handleKeys)
-	mux.HandleFunc("/api/admin/keys/", h.handleKeyDelete)
-	mux.HandleFunc("/ws/traffic", h.handleWebSocket)
+// If authMw is non-nil, all admin routes are protected by authentication.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux, authMw *auth.Middleware) {
+	wrap := func(handler http.HandlerFunc) http.Handler {
+		if authMw != nil {
+			return authMw.AuthMiddleware(http.HandlerFunc(handler))
+		}
+		return http.HandlerFunc(handler)
+	}
+
+	mux.Handle("/api/admin/model/info", wrap(h.handleModelInfo))
+	mux.Handle("/api/admin/model/config", wrap(h.handleModelConfig))
+	mux.Handle("/api/admin/subnets", wrap(h.handleSubnets))
+	mux.Handle("/api/admin/subnets/unban", wrap(h.handleSubnetUnban))
+	mux.Handle("/api/admin/keys", wrap(h.handleKeys))
+	mux.Handle("/api/admin/keys/", wrap(h.handleKeyDelete))
+	mux.Handle("/ws/traffic", wrap(h.handleWebSocket))
 }
 
 // handleModelInfo proxies model info from the ML service.
@@ -382,11 +407,18 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 	keyHash := auth.HashAPIKey(key)
 	keyPrefix := key[:7] // "gr_" + first 4 hex chars
 
+	// Extract user_id from auth context (admin routes are behind auth middleware)
 	ctx := r.Context()
+	userID := auth.GetUserID(ctx)
+	if userID == "" {
+		http.Error(w, `{"error":"user_id not found in auth context"}`, http.StatusUnauthorized)
+		return
+	}
+
 	_, err = h.pgPool.Exec(ctx, `
-		INSERT INTO api_keys (id, key_hash, key_prefix, name, rate_limit, active, created_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, true, NOW())
-	`, keyHash, keyPrefix, req.Name, req.RateLimit)
+		INSERT INTO api_keys (id, key_hash, key_prefix, name, user_id, rate_limit, active, created_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, true, NOW())
+	`, keyHash, keyPrefix, req.Name, userID, req.RateLimit)
 	if err != nil {
 		log.Printf("ERROR: insert api key: %v", err)
 		http.Error(w, `{"error":"failed to create key"}`, http.StatusInternalServerError)

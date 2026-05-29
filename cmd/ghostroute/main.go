@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/lucifer7838/ghostroute/internal/admin"
 	"github.com/lucifer7838/ghostroute/internal/auth"
@@ -149,11 +150,18 @@ func main() {
 
 	// Initialize postback handler
 	var postbackHandler *postback.Handler
-	if producer != nil {
-		postbackHandler = postback.NewHandler(clickhouseDSN, producer)
+	var chConn driver.Conn
+	chOpts, chErr := clickhouse.ParseDSN(clickhouseDSN)
+	if chErr == nil {
+		chConn, chErr = clickhouse.Open(chOpts)
+		if chErr != nil {
+			log.Printf("WARN: clickhouse connection for postback failed: %v", chErr)
+			chConn = nil
+		}
 	} else {
-		postbackHandler = postback.NewHandler(clickhouseDSN, nil)
+		log.Printf("WARN: clickhouse DSN parse for postback failed: %v", chErr)
 	}
+	postbackHandler = postback.NewHandler(chConn, producer)
 
 	// Initialize ClickHouse query proxy for admin dashboard
 	queryHandler := newQueryHandler(clickhouseDSN)
@@ -186,8 +194,8 @@ func main() {
 		mux.Handle("/api/query", rateLimitMw(http.HandlerFunc(queryHandler)))
 	}
 
-	// Register admin API routes
-	adminHandler.RegisterRoutes(mux)
+	// Register admin API routes (protected by auth middleware)
+	adminHandler.RegisterRoutes(mux, authMw)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -220,6 +228,11 @@ func main() {
 
 	if pgPool != nil {
 		pgPool.Close()
+	}
+	if chConn != nil {
+		if err := chConn.Close(); err != nil {
+			log.Printf("ERROR: clickhouse postback conn close: %v", err)
+		}
 	}
 	if producer != nil {
 		if err := producer.Close(); err != nil {

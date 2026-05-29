@@ -18,6 +18,7 @@ import (
 	"github.com/lucifer7838/ghostroute/internal/ja3"
 	"github.com/lucifer7838/ghostroute/internal/qdrant"
 	"github.com/lucifer7838/ghostroute/internal/rabbitmq"
+	"github.com/lucifer7838/ghostroute/internal/subnet"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -47,14 +48,15 @@ type ASNInfo struct {
 
 // Handler implements the /evaluate endpoint logic.
 type Handler struct {
-	ipClient     *ipmatch.Client
-	campaigns    *campaign.Loader
-	clickLogger  *clicklog.Logger
-	ja3Client    *ja3.Client
-	qdrantClient *qdrant.Client
-	producer     *rabbitmq.Producer
-	redisClient  *redis.Client
-	botThreshold float64
+	ipClient      *ipmatch.Client
+	campaigns     *campaign.Loader
+	clickLogger   *clicklog.Logger
+	ja3Client     *ja3.Client
+	qdrantClient  *qdrant.Client
+	producer      *rabbitmq.Producer
+	redisClient   *redis.Client
+	subnetBanner  *subnet.SubnetBanner
+	botThreshold  float64
 }
 
 // NewHandler creates a new evaluate handler.
@@ -87,6 +89,11 @@ func (h *Handler) SetRedisClient(rc *redis.Client) {
 	h.redisClient = rc
 }
 
+// SetSubnetBanner sets the subnet banner for dynamic /24 subnet banning.
+func (h *Handler) SetSubnetBanner(sb *subnet.SubnetBanner) {
+	h.subnetBanner = sb
+}
+
 // ServeHTTP handles POST /evaluate requests.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -101,6 +108,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	// Check subnet ban first (before any other checks)
+	if h.subnetBanner != nil && req.IP != "" {
+		banned, err := h.subnetBanner.IsBanned(ctx, req.IP)
+		if err == nil && banned {
+			resp := EvaluateResponse{
+				Decision: "block",
+				Score:    1.0,
+				Reason:   "subnet_ban",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+	}
 
 	// Lookup ASN
 	var asnInfo *ASNInfo
@@ -197,6 +220,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.Score = 0.0
 			resp.Reason = "clean"
 		}
+	}
+
+	// Record bot hit for subnet banning on block decision
+	if resp.Decision == "block" && h.subnetBanner != nil && req.IP != "" {
+		go func() {
+			hitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.subnetBanner.RecordBotHit(hitCtx, req.IP); err != nil {
+				log.Printf("ERROR: record bot hit for subnet ban: %v", err)
+			}
+		}()
 	}
 
 	// Fire-and-forget log to ClickHouse

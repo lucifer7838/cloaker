@@ -16,6 +16,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/lucifer7838/ghostroute/internal/auth"
 	"github.com/lucifer7838/ghostroute/internal/campaign"
 	"github.com/lucifer7838/ghostroute/internal/clicklog"
 	"github.com/lucifer7838/ghostroute/internal/evaluate"
@@ -23,6 +24,10 @@ import (
 	"github.com/lucifer7838/ghostroute/internal/ipmatch"
 	"github.com/lucifer7838/ghostroute/internal/postback"
 	"github.com/lucifer7838/ghostroute/internal/rabbitmq"
+	"github.com/lucifer7838/ghostroute/internal/ratelimit"
+	"github.com/lucifer7838/ghostroute/internal/subnet"
+	"github.com/lucifer7838/ghostroute/internal/tenant"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -35,6 +40,8 @@ func main() {
 	rabbitmqURL := getEnv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 	_ = getEnv("ML_SERVICE_URL", "http://localhost:8000")
 	botThreshold := getEnvFloat("BOT_THRESHOLD", 0.7)
+	defaultRateLimit := getEnvInt("DEFAULT_RATE_LIMIT", 1000)
+	subnetBanThreshold := getEnvInt("SUBNET_BAN_THRESHOLD", 5)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -48,6 +55,34 @@ func main() {
 		Password: redisPassword,
 		DB:       0,
 	})
+
+	// Initialize SubnetBanner for dynamic /24 subnet banning
+	subnetBanner := subnet.NewSubnetBanner(redisClient, subnetBanThreshold, subnet.DefaultWindow)
+
+	// Initialize PostgreSQL connection pool for auth and tenant services
+	var pgPool *pgxpool.Pool
+	pgPool, err := pgxpool.New(ctx, postgresDSN)
+	if err != nil {
+		log.Printf("WARN: pgxpool init for auth/tenant failed: %v", err)
+		pgPool = nil
+	}
+
+	// Initialize auth middleware
+	var authMw *auth.Middleware
+	if pgPool != nil {
+		keyStore := auth.NewKeyStore(pgPool)
+		authMw = auth.NewMiddleware(keyStore, redisClient)
+	}
+
+	// Initialize tenant service
+	var tenantSvc *tenant.TenantService
+	if pgPool != nil {
+		tenantSvc = tenant.NewTenantService(pgPool)
+	}
+	_ = tenantSvc
+
+	// Initialize rate limiter
+	rateLimiter := ratelimit.NewRateLimiter(redisClient, defaultRateLimit)
 
 	// Initialize PostgreSQL campaign loader
 	campaignLoader, err := campaign.NewLoader(ctx, postgresDSN)
@@ -106,6 +141,7 @@ func main() {
 		evalHandler.SetProducer(producer)
 	}
 	evalHandler.SetRedisClient(redisClient)
+	evalHandler.SetSubnetBanner(subnetBanner)
 
 	// Initialize fingerprint handler
 	fpHandler := fingerprint.NewHandler(redisClient, nil)
@@ -126,8 +162,24 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.Handle("/evaluate", evalHandler)
 	mux.Handle("/fingerprint", fpHandler)
-	mux.Handle("/api/postback", postbackHandler)
-	mux.HandleFunc("/api/query", queryHandler)
+
+	// Apply auth and rate limiting to API routes
+	apiKeyExtractor := func(r *http.Request) string {
+		key := r.Header.Get("X-API-Key")
+		if key == "" {
+			key = r.URL.Query().Get("api_key")
+		}
+		return key
+	}
+	rateLimitMw := rateLimiter.Middleware(apiKeyExtractor, nil)
+
+	if authMw != nil {
+		mux.Handle("/api/postback", authMw.AuthMiddleware(rateLimitMw(postbackHandler)))
+		mux.Handle("/api/query", authMw.AuthMiddleware(rateLimitMw(http.HandlerFunc(queryHandler))))
+	} else {
+		mux.Handle("/api/postback", rateLimitMw(postbackHandler))
+		mux.Handle("/api/query", rateLimitMw(http.HandlerFunc(queryHandler)))
+	}
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -158,6 +210,9 @@ func main() {
 
 	cancel()
 
+	if pgPool != nil {
+		pgPool.Close()
+	}
 	if producer != nil {
 		if err := producer.Close(); err != nil {
 			log.Printf("ERROR: rabbitmq producer close: %v", err)
@@ -201,6 +256,16 @@ func getEnvFloat(key string, defaultVal float64) float64 {
 		f, err := strconv.ParseFloat(v, 64)
 		if err == nil {
 			return f
+		}
+	}
+	return defaultVal
+}
+
+func getEnvInt(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		i, err := strconv.Atoi(v)
+		if err == nil {
+			return i
 		}
 	}
 	return defaultVal
